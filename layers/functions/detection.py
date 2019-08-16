@@ -1,7 +1,7 @@
 import torch
 from torch.autograd import Function
-from ..box_utils import decode, nms
-from data import voc as cfg
+from ..box_utils import decode, nms, decode_landmark
+from data.config import celeba as cfg
 
 
 class Detect(Function):
@@ -21,7 +21,7 @@ class Detect(Function):
         self.conf_thresh = conf_thresh
         self.variance = cfg['variance']
 
-    def forward(self, loc_data, conf_data, prior_data):
+    def forward(self, all_data, conf_data, prior_data):
         """
         Args:
             loc_data: (tensor) Loc preds from loc layers
@@ -31,23 +31,41 @@ class Detect(Function):
             prior_data: (tensor) Prior boxes and variances from priorbox layers
                 Shape: [1,num_priors,4]
         """
+        loc_data = all_data[:,:, 12:]
+        landmark_data = all_data[:,:, :10]
+
         num = loc_data.size(0)  # batch size
         num_priors = prior_data.size(0)
         output = torch.zeros(num, self.num_classes, self.top_k, 5)
         conf_preds = conf_data.view(num, num_priors,
                                     self.num_classes).transpose(2, 1)
 
+        print ("loc_data: ", loc_data)
+        print ("conf_data", conf_data)
+
         # Decode predictions into bboxes.
         for i in range(num):
+            print ("loc:", loc_data[i].shape)
+            print ("prior_data:", prior_data.shape)
             decoded_boxes = decode(loc_data[i], prior_data, self.variance)
+            print ("decoded_boxes", decoded_boxes)
+
+
+            decoded_landmarks = decode_landmark(landmark_data[i], prior_data, self.variance)
+
             # For each class, perform nms
             conf_scores = conf_preds[i].clone()
 
+            print ("conf_scores", conf_scores)
+
             for cl in range(1, self.num_classes):
+                print ("start ....")
                 c_mask = conf_scores[cl].gt(self.conf_thresh)
                 scores = conf_scores[cl][c_mask]
                 if scores.size(0) == 0:
                     continue
+
+                print ("c_mask: ", c_mask)
                 l_mask = c_mask.unsqueeze(1).expand_as(decoded_boxes)
                 boxes = decoded_boxes[l_mask].view(-1, 4)
                 # idx of highest scoring and non-overlapping boxes per class
@@ -55,6 +73,11 @@ class Detect(Function):
                 output[i, cl, :count] = \
                     torch.cat((scores[ids[:count]].unsqueeze(1),
                                boxes[ids[:count]]), 1)
+                
+                land_mask = c_mask.unsqueeze(1).expand_as(decoded_landmarks)
+                lanmarks = decoded_landmarks[land_mask].view(-1, 10)
+                print (lanmarks)
+
         flt = output.contiguous().view(num, -1, 5)
         _, idx = flt[:, :, 0].sort(1, descending=True)
         _, rank = idx.sort(1)

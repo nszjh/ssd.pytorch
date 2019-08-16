@@ -1,7 +1,10 @@
-from data import *
-from utils.augmentations import SSDAugmentation
-from layers.modules import MultiBoxLoss
-from ssd import build_ssd
+from data.celeba import *
+# from utils.augmentations import SSDAugmentation
+from layers.modules.multibox_loss_blaze import BlazeMultiBoxLoss
+# from ssd import build_ssd
+from blazeface import build_blazeface
+from data.config import celeba
+
 import os
 import sys
 import time
@@ -23,19 +26,19 @@ def str2bool(v):
 parser = argparse.ArgumentParser(
     description='Single Shot MultiBox Detector Training With Pytorch')
 train_set = parser.add_mutually_exclusive_group()
-parser.add_argument('--dataset', default='VOC', choices=['VOC', 'COCO'],
-                    type=str, help='VOC or COCO')
-parser.add_argument('--dataset_root', default=VOC_ROOT,
+parser.add_argument('--dataset', default='VOC', choices=['VOC', 'COCO', 'CELEBA'],
+                    type=str, help='VOC or COCO or CELEBA')
+parser.add_argument('--dataset_root', default=CELEBA_ROOT,
                     help='Dataset root directory path')
 parser.add_argument('--basenet', default='vgg16_reducedfc.pth',
                     help='Pretrained base model')
-parser.add_argument('--batch_size', default=32, type=int,
+parser.add_argument('--batch_size', default=1, type=int,
                     help='Batch size for training')
 parser.add_argument('--resume', default=None, type=str,
                     help='Checkpoint state_dict file to resume training from')
 parser.add_argument('--start_iter', default=0, type=int,
                     help='Resume training at this iter')
-parser.add_argument('--num_workers', default=4, type=int,
+parser.add_argument('--num_workers', default=1, type=int,
                     help='Number of workers used in dataloading')
 parser.add_argument('--cuda', default=True, type=str2bool,
                     help='Use CUDA to train model')
@@ -88,24 +91,32 @@ def train():
                                transform=SSDAugmentation(cfg['min_dim'],
                                                          MEANS))
 
+    elif args.dataset == 'CELEBA':
+        # if args.dataset_root == CELEBA_ROOT:
+        #     parser.error('Must specify dataset if specifying dataset_root')
+        cfg = celeba
+        dataset = CelebaDetection(root=args.dataset_root)
+
     if args.visdom:
         import visdom
         viz = visdom.Visdom()
 
-    ssd_net = build_ssd('train', cfg['min_dim'], cfg['num_classes'])
-    net = ssd_net
+    # ssd_net = build_ssd('train', cfg['min_dim'], cfg['num_classes'])
+    # net = ssd_net
+    blaze_net = build_blazeface('train')
+    net = blaze_net
 
     if args.cuda:
-        net = torch.nn.DataParallel(ssd_net)
+        net = torch.nn.DataParallel(blaze_net)
         cudnn.benchmark = True
 
     if args.resume:
         print('Resuming training, loading {}...'.format(args.resume))
-        ssd_net.load_weights(args.resume)
-    else:
-        vgg_weights = torch.load(args.save_folder + args.basenet)
-        print('Loading base network...')
-        ssd_net.vgg.load_state_dict(vgg_weights)
+        blaze_net.load_weights(args.resume)
+    # else:
+    #     vgg_weights = torch.load(args.save_folder + args.basenet)
+    #     print('Loading base network...')
+    #     blaze_net.load_state_dict(vgg_weights)
 
     if args.cuda:
         net = net.cuda()
@@ -113,13 +124,13 @@ def train():
     if not args.resume:
         print('Initializing weights...')
         # initialize newly added layers' weights with xavier method
-        ssd_net.extras.apply(weights_init)
-        ssd_net.loc.apply(weights_init)
-        ssd_net.conf.apply(weights_init)
+        # blaze_net.extras.apply(weights_init)
+        # blaze_net.loc.apply(weights_init)
+        # blaze_net.conf.apply(weights_init)
 
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum,
                           weight_decay=args.weight_decay)
-    criterion = MultiBoxLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
+    criterion = BlazeMultiBoxLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
                              False, args.cuda)
 
     net.train()
@@ -129,7 +140,7 @@ def train():
     epoch = 0
     print('Loading the dataset...')
 
-    epoch_size = len(dataset) // args.batch_size
+    epoch_size = len(dataset) # args.batch_size
     print('Training SSD on:', dataset.name)
     print('Using the specified args:')
     print(args)
@@ -144,10 +155,12 @@ def train():
 
     data_loader = data.DataLoader(dataset, args.batch_size,
                                   num_workers=args.num_workers,
-                                  shuffle=True, collate_fn=detection_collate,
+                                  shuffle=True,
                                   pin_memory=True)
     # create batch iterator
     batch_iterator = iter(data_loader)
+
+    with_landmark = ""
     for iteration in range(args.start_iter, cfg['max_iter']):
         if args.visdom and iteration != 0 and (iteration % epoch_size == 0):
             update_vis_plot(epoch, loc_loss, conf_loss, epoch_plot, None,
@@ -163,29 +176,51 @@ def train():
 
         # load train data
         images, targets = next(batch_iterator)
+        # print ("dataset: ", images.shape, targets.shape)
+        if targets[-1, -1, 10] == 0:
+            continue
 
         if args.cuda:
             images = Variable(images.cuda())
-            targets = [Variable(ann.cuda(), volatile=True) for ann in targets]
+            # targets = [Variable(ann.cuda(), volatile=True) for ann in targets]
+            targets = Variable(targets.cuda())
         else:
             images = Variable(images)
-            targets = [Variable(ann, volatile=True) for ann in targets]
+            # targets = [Variable(ann, volatile=True) for ann in targets]
+            targets = Variable(targets.cuda())
+
         # forward
         t0 = time.time()
-        out = net(images)
+        out1, out2, priors = net(images)
+
+        # print ("output: ")
+        # print (out1.shape)
+        # print (out2.shape)
+        # print (priors.shape)
         # backprop
         optimizer.zero_grad()
-        loss_l, loss_c = criterion(out, targets)
-        loss = loss_l + loss_c
+        loss_l, loss_c, loss_land = criterion((out1, out2, priors), targets)
+
+        loss = loss_l + loss_c  # + loss_land
+        loss_with_land = loss_land + loss_c
+        
+        if (len(loss_with_land.data) > 0):
+            with_landmark = "with_land_"
+        
+        loss = loss.mean() + loss_with_land.mean()
         loss.backward()
+
         optimizer.step()
         t1 = time.time()
-        loc_loss += loss_l.data[0]
-        conf_loss += loss_c.data[0]
+        # print ("loss_l", loss_l.shape)
+        loc_loss += loss_l.data[0]  #loss
+        # conf_loss += loss_c.data[0] #loss
+
 
         if iteration % 10 == 0:
             print('timer: %.4f sec.' % (t1 - t0))
-            print('iter ' + repr(iteration) + ' || Loss: %.4f ||' % (loss.data[0]), end=' ')
+            # print('iter ' + repr(iteration) + ' || Loss: %.4f ||' % (loss.data[0]))
+            print('iter ' + repr(iteration) + ' || Loss: %.6f ||' % (loss.data)) 
 
         if args.visdom:
             update_vis_plot(iteration, loss_l.data[0], loss_c.data[0],
@@ -193,10 +228,12 @@ def train():
 
         if iteration != 0 and iteration % 5000 == 0:
             print('Saving state, iter:', iteration)
-            torch.save(ssd_net.state_dict(), 'weights/ssd300_COCO_' +
-                       repr(iteration) + '.pth')
-    torch.save(ssd_net.state_dict(),
+            torch.save(blaze_net.state_dict(), 'weights/blaze_face_' + with_landmark + 
+                       repr(iteration) + "_loss_" + str(float(loss.data)) + '.pth')
+
+    torch.save(blaze_net.state_dict(),
                args.save_folder + '' + args.dataset + '.pth')
+
 
 
 def adjust_learning_rate(optimizer, gamma, step):
@@ -214,10 +251,6 @@ def xavier(param):
     init.xavier_uniform(param)
 
 
-def weights_init(m):
-    if isinstance(m, nn.Conv2d):
-        xavier(m.weight.data)
-        m.bias.data.zero_()
 
 
 def create_vis_plot(_xlabel, _ylabel, _title, _legend):

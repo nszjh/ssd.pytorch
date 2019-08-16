@@ -59,6 +59,10 @@ def jaccard(box_a, box_b):
     Return:
         jaccard overlap: (tensor) Shape: [box_a.size(0), box_b.size(0)]
     """
+    # print ("jaccard")
+    # print (box_a.shape)
+    # print (box_b.shape)
+
     inter = intersect(box_a, box_b)
     area_a = ((box_a[:, 2]-box_a[:, 0]) *
               (box_a[:, 3]-box_a[:, 1])).unsqueeze(1).expand_as(inter)  # [A,B]
@@ -66,6 +70,7 @@ def jaccard(box_a, box_b):
               (box_b[:, 3]-box_b[:, 1])).unsqueeze(0).expand_as(inter)  # [A,B]
     union = area_a + area_b - inter
     return inter / union  # [A,B]
+
 
 
 def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
@@ -86,30 +91,193 @@ def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
     # jaccard index
+    # print (point_form(priors))
+    # print (turths_with_back)
+
     overlaps = jaccard(
         truths,
         point_form(priors)
     )
+    # print ("label", labels)
+    # print ("truths", truths.shape)
+    # print("overlaps", overlaps.shape)
+    # print ("overlaps", overlaps)
     # (Bipartite Matching)
     # [1,num_objects] best prior for each ground truth
-    best_prior_overlap, best_prior_idx = overlaps.max(1, keepdim=True)
+    best_prior_overlap, best_prior_idx = overlaps.max(1, keepdim=True)#每行
+
+    # print ("best_prior_overlap", best_prior_overlap, best_prior_idx)
+    # print (best_prior_overlap.shape, best_prior_idx.shape)
+
     # [1,num_priors] best ground truth for each prior
-    best_truth_overlap, best_truth_idx = overlaps.max(0, keepdim=True)
+    best_truth_overlap, best_truth_idx = overlaps.max(0, keepdim=True)#每列
+    # print ("best_truth_overlap", best_truth_overlap, best_truth_idx)
+    # print (best_truth_overlap.shape, best_truth_idx.shape)
+
     best_truth_idx.squeeze_(0)
     best_truth_overlap.squeeze_(0)
     best_prior_idx.squeeze_(1)
     best_prior_overlap.squeeze_(1)
+    # print ("squeeze")
+    # print (best_prior_overlap.shape, best_prior_idx.shape)
+    # print (best_truth_overlap.shape, best_truth_idx.shape)
     best_truth_overlap.index_fill_(0, best_prior_idx, 2)  # ensure best prior
+
+    # print ("after  best_truth_overlap", best_truth_overlap)
+
     # TODO refactor: index  best_prior_idx with long tensor
     # ensure every gt matches with its prior of max overlap
+
     for j in range(best_prior_idx.size(0)):
         best_truth_idx[best_prior_idx[j]] = j
+
+
     matches = truths[best_truth_idx]          # Shape: [num_priors,4]
     conf = labels[best_truth_idx] + 1         # Shape: [num_priors]
+    # print ("conf:", conf)
+
     conf[best_truth_overlap < threshold] = 0  # label as background
     loc = encode(matches, priors, variances)
-    loc_t[idx] = loc    # [num_priors,4] encoded offsets to learn
+    loc_t[idx] = loc    # [num_priors, 4] encoded offsets to learn
     conf_t[idx] = conf  # [num_priors] top class label for each prior
+
+    # print ("after  best_truth_idx, ", best_truth_idx)
+    # print ("matches:", matches)
+    # print ("loc_t:", loc_t[idx].shape)
+    # print ("conf:", conf_t[idx].shape)
+    
+
+
+
+def match1(threshold, truths, priors, variances, labels, landmark, loc_t, conf_t, landmark_t, idx):
+    """Match each prior box with the ground truth box of the highest jaccard
+    overlap, encode the bounding boxes, then return the matched indices
+    corresponding to both confidence and location preds.
+    Args:
+        threshold: (float) The overlap threshold used when mathing boxes.
+        truths: (tensor) Ground truth boxes, Shape: [num_obj, num_priors].
+        priors: (tensor) Prior boxes from priorbox layers, Shape: [n_priors,4].
+        variances: (tensor) Variances corresponding to each prior coord,
+            Shape: [num_priors, 4].
+        labels: (tensor) All the class labels for the image, Shape: [num_obj].
+        loc_t: (tensor) Tensor to be filled w/ endcoded location targets.
+        conf_t: (tensor) Tensor to be filled w/ matched indices for conf preds.
+        idx: (int) current batch index
+    Return:
+        The matched indices corresponding to 1)location and 2)confidence preds.
+    """
+    # jaccard index
+    # print (point_form(priors))
+    # print (turths_with_back)
+
+    overlaps = jaccard(
+        truths,
+        point_form(priors)
+    )
+    # print ("label", labels)
+    # print ("truths", truths.shape)
+    # print("overlaps", overlaps.shape)
+    # print ("overlaps", overlaps)
+    # (Bipartite Matching)
+    # [1,num_objects] best prior for each ground truth
+    best_prior_overlap, best_prior_idx = overlaps.max(1, keepdim=True)#每行
+
+    # print ("best_prior_overlap", best_prior_overlap, best_prior_idx)
+    # print (best_prior_overlap.shape, best_prior_idx.shape)
+
+    # [1,num_priors] best ground truth for each prior
+    best_truth_overlap, best_truth_idx = overlaps.max(0, keepdim=True)#每列
+    # print ("best_truth_overlap", best_truth_overlap, best_truth_idx)
+    # print (best_truth_overlap.shape, best_truth_idx.shape)
+
+    best_truth_idx.squeeze_(0)
+    best_truth_overlap.squeeze_(0)
+    best_prior_idx.squeeze_(1)
+    best_prior_overlap.squeeze_(1)
+    # print ("squeeze")
+    # print (best_prior_overlap.shape, best_prior_idx.shape)
+    # print (best_truth_overlap.shape, best_truth_idx.shape)
+    best_truth_overlap.index_fill_(0, best_prior_idx, 2)  # ensure best prior
+
+    # print ("after  best_truth_overlap", best_truth_overlap)
+
+    # TODO refactor: index  best_prior_idx with long tensor
+    # ensure every gt matches with its prior of max overlap
+
+    for j in range(best_prior_idx.size(0)):
+        best_truth_idx[best_prior_idx[j]] = j
+
+
+    matches = truths[best_truth_idx]          # Shape: [num_priors,4]
+    matches_land = landmark[best_truth_idx]
+    conf = labels[best_truth_idx] + 1         # Shape: [num_priors]
+    # print ("conf:", conf)
+
+    conf[best_truth_overlap < threshold] = 0  # label as background
+    loc = encode(matches, priors, variances)
+    land = encode_landmark(matches_land, priors, variances)
+
+    loc_t[idx] = loc    # [num_priors, 4] encoded offsets to learn
+    conf_t[idx] = conf  # [num_priors] top class label for each prior
+    landmark_t[idx] = land
+    # print ("after  best_truth_idx, ", best_truth_idx)
+
+    # print ("matches:", matches_land, matches_land.shape)
+    # print ("landmark_t:", landmark_t, landmark_t.shape)
+    # print ("conf:", conf_t[idx].shape)
+    
+
+
+def encode_landmark(matched, priors, variances):
+    """Encode the variances from the priorbox layers into the ground truth boxes
+    we have matched (based on jaccard overlap) with the prior boxes.
+    Args:
+        matched: (tensor) Coords of ground truth for each prior in point-form
+            Shape: [num_priors, 10].
+        priors: (tensor) Prior boxes in center-offset form
+            Shape: [num_priors,4].
+        variances: (list[float]) Variances of priorboxes
+    Return:
+        encoded boxes (tensor), Shape: [num_priors, 4]
+    """
+
+    # 
+    g_xy1 = matched[:, :2] - priors[:, :2]
+    g_xy2 = matched[:, 2:4] - priors[:, :2]
+    g_xy3 = matched[:, 4:6] - priors[:, :2]
+    g_xy4 = matched[:, 6:8] - priors[:, :2]
+    g_xy5 = matched[:, 8:10] - priors[:, :2]
+    # encode variance
+
+
+    # return target for smooth_l1_loss
+    return torch.cat([g_xy1, g_xy2, g_xy3, g_xy4, g_xy5], 1)  # [num_priors,10]
+
+def decode_landmark(land, priors, variances):
+    """Encode the variances from the priorbox layers into the ground truth boxes
+    we have matched (based on jaccard overlap) with the prior boxes.
+    Args:
+        matched: (tensor) Coords of ground truth for each prior in point-form
+            Shape: [num_priors, 10].
+        priors: (tensor) Prior boxes in center-offset form
+            Shape: [num_priors,4].
+        variances: (list[float]) Variances of priorboxes
+    Return:
+        encoded boxes (tensor), Shape: [num_priors, 4]
+    """
+
+    # 
+    land1 = land
+    land1[:, :2] = land[:, :2] + priors[:, :2]
+    land1[:, 2:4] = land[:, 2:4] + priors[:, :2]
+    land1[:, 4:6] = land[:, 4:6] + priors[:, :2]
+    land1[:, 6:8] = land[:, 6:8] + priors[:, :2]
+    land1[:, 8:10] = land[:, 8:10] + priors[:, :2]
+    # encode variance
+
+
+    # return target for smooth_l1_loss
+    return   land1  # [num_priors,10]
 
 
 def encode(matched, priors, variances):
